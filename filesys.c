@@ -6,6 +6,7 @@
 #include<fcntl.h>
 #include<string.h>
 #include<ctype.h>
+#include <inttypes.h>
 #include "filesys.h"
 
 
@@ -123,6 +124,7 @@ int GetEntry(struct Entry *pentry)
 		perror("read entry failed");
 	count += ret;
 
+	/* free space */
 	if(buf[0]==0xe5)
 		return -1*count;
 	if(buf[0]==0x00)
@@ -168,6 +170,19 @@ int GetEntry(struct Entry *pentry)
 		return count;
 	}
 }
+
+/*
+*功能：创建子目录
+*
+*/
+void mymkdir()
+{
+	/*若为根目录*/
+	if(curdir==NULL){
+
+	}
+}
+
 
 /*
 *功能：显示当前目录的内容
@@ -224,7 +239,7 @@ int fd_ls()
 	{
 		/* added by Pengcheng YIN */
 
-		int clusterNum = curdir->FirstCluster;
+		unsigned short clusterNum = curdir->FirstCluster;
 		while(clusterNum!=0xFFFF){
 			cluster_addr = DATA_OFFSET + (clusterNum-2) * CLUSTER_SIZE ;
 			if((ret = lseek(fd,cluster_addr,SEEK_SET))<0)
@@ -309,7 +324,7 @@ int ScanEntry (char *entryname,struct Entry *pentry,int mode)
 	/*扫描子目录*/
 	else  
 	{
-		cluster_addr = DATA_OFFSET + (curdir->FirstCluster - 2)*CLUSTER_SIZE;
+		/*cluster_addr = DATA_OFFSET + (curdir->FirstCluster - 2)*CLUSTER_SIZE;
 		if((ret = lseek(fd,cluster_addr,SEEK_SET))<0)
 			perror("lseek cluster_addr failed");
 		offset= cluster_addr;
@@ -325,9 +340,37 @@ int ScanEntry (char *entryname,struct Entry *pentry,int mode)
 			if(pentry->subdir == mode &&!strcmp((char*)pentry->short_name,uppername))
 				return offset;
 
+		}*/
 
+		/* added by Pengcheng YIN */
 
+		unsigned short clusterNum = curdir->FirstCluster;
+		while(clusterNum!=0xFFFF){
+			cluster_addr = DATA_OFFSET + (clusterNum-2) * CLUSTER_SIZE ;
+			if((ret = lseek(fd,cluster_addr,SEEK_SET))<0)
+				perror("lseek cluster_addr failed");
+			offset = cluster_addr;
+
+			/*读一簇的内容*/
+			while(offset<cluster_addr + CLUSTER_SIZE)
+			{
+				ret = GetEntry(pentry);
+
+				if(ret==0)
+					break;
+
+				offset += abs(ret);
+				if(ret > 0)
+				{
+					if(pentry->subdir == mode &&!strcmp((char*)pentry->short_name,uppername))
+						return offset;
+				}
+			}
+
+			clusterNum = GetFatCluster(clusterNum);
 		}
+		/* the end */
+
 		return -1;
 	}
 }
