@@ -7,6 +7,7 @@
 #include<string.h>
 #include<ctype.h>
 #include <inttypes.h>
+#include <time.h>
 #include "filesys.h"
 
 
@@ -16,6 +17,19 @@
 /*
 *功能：打印启动项记录
 */
+
+unsigned short getFatCluster(unsigned short prev)
+{
+	unsigned short next;
+	int index;
+
+	index=prev*2;
+	next=RevByte(fatbuf[index],fatbuf[index+1]);
+
+	return next;
+}
+
+
 void ScanBootSector()
 {
 	unsigned char buf[SECTOR_SIZE];
@@ -550,6 +564,48 @@ int fd_df(char *filename)
 }
 
 
+int ud_rf(char *filename)
+{
+	struct Entry *pentry;
+	int ret,size,page;
+	int i=0;
+	unsigned char *buf;
+	unsigned short seed;
+
+	pentry=(struct Entry *)malloc(sizeof(Entry));
+	ret=ScanEntry(filename,pentry,0);			//扫描当前目录查找文件
+
+	if(ret<0)
+	{
+		printf("no such file\n");
+		free(pentry);
+		return -1;
+	}
+
+	seed=pentry->FirstCluster;
+	size=pentry->size;
+	page=size/CLUSTER_SIZE;
+	buf=(unsigned char *)malloc(sizeof(unsigned char)*size);
+
+	for(i=0;i<page;i++)
+	{
+		if((ret=lseek(fd,(seed-2)*CLUSTER_SIZE+DATA_OFFSET,SEEK_SET))<0)
+			perror("lseek cluster_addr failed");
+		read(fd,buf+i*CLUSTER_SIZE,CLUSTER_SIZE);
+		seed=getFatCluster(seed);
+	}
+	if((ret=lseek(fd,(seed-2)*CLUSTER_SIZE+DATA_OFFSET,SEEK_SET))<0)
+		perror("lseek cluster_addr failed");
+	read(fd,buf+i*CLUSTER_SIZE,size-i*CLUSTER_SIZE);
+
+	for(i=0;i<size;i++)
+		printf("%c",buf[i]);
+	printf("\n");
+
+	return 0;
+}
+
+
 /*
 *参数：filename，类型：char，创建文件的名称
 size，    类型：int，文件的大小
@@ -558,110 +614,121 @@ size，    类型：int，文件的大小
 */
 int fd_cf(char *filename,int size)
 {
-
 	struct Entry *pentry;
 	int ret,i=0,cluster_addr,offset;
-	unsigned short cluster,clusterno[100];
+	unsigned short cluster,clusterno[FAT_SIZE];
 	unsigned char c[DIR_ENTRY_SIZE];
 	int index,clustersize;
 	unsigned char buf[DIR_ENTRY_SIZE];
-	pentry = (struct Entry*)malloc(sizeof(struct Entry));
+	struct tm *local;
+	time_t t;
+	int cutime,cudate;
+	unsigned char data[size];
 
+	t=time(NULL);
+	local=localtime(&t);
+	cutime=local->tm_hour*2048+local->tm_min*32+local->tm_sec/2;
+	cudate=(local->tm_year+1900-1980)*512+(local->tm_mon+1)*32+local->tm_mday;
 
-	clustersize = (size / (CLUSTER_SIZE));
-
-	if(size % (CLUSTER_SIZE) != 0)
-		clustersize ++;
-
-	//扫描根目录，是否已存在该文件名
-	ret = ScanEntry(filename,pentry,0);
-	if (ret<0)
+	pentry=(struct Entry *)malloc(sizeof(struct Entry));
+	ret=ScanEntry(filename,pentry,0);			//扫描根目录，是否已存在该文件名
+	if(ret<0)
 	{
+		printf("enter the file's data:\n");
+		scanf("%s",data);
+		size=strlen(data);
+		clustersize=size/CLUSTER_SIZE;
+
+		if(size%CLUSTER_SIZE!=0)
+			clustersize++;
+
 		/*查询fat表，找到空白簇，保存在clusterno[]中*/
 		for(cluster=2;cluster<1000;cluster++)
 		{
-			index = cluster *2;
+			index=cluster*2;
 			if(fatbuf[index]==0x00&&fatbuf[index+1]==0x00)
 			{
-				clusterno[i] = cluster;
+				clusterno[i]=cluster;
 
 				i++;
 				if(i==clustersize)
 					break;
-
 			}
-
 		}
 
 		/*在fat表中写入下一簇信息*/
 		for(i=0;i<clustersize-1;i++)
 		{
-			index = clusterno[i]*2;
+			index=clusterno[i]*2;
+			fatbuf[index]=(clusterno[i+1]&0x00ff);
+			fatbuf[index+1]=((clusterno[i+1]&0xff00)>>8);
 
-			fatbuf[index] = (clusterno[i+1] &  0x00ff);
-			fatbuf[index+1] = ((clusterno[i+1] & 0xff00)>>8);
-
-
+			if(lseek(fd,(clusterno[i]-2)*CLUSTER_SIZE+DATA_OFFSET,SEEK_SET)<0)
+				perror("lseek file data failed");
+			if(write(fd,data+i*CLUSTER_SIZE,CLUSTER_SIZE)<0)
+				perror("write failed");
 		}
 		/*最后一簇写入0xffff*/
-		index = clusterno[i]*2;
-		fatbuf[index] = 0xff;
-		fatbuf[index+1] = 0xff;
+		index=clusterno[i]*2;
+		fatbuf[index]=0xff;
+		fatbuf[index+1]=0xff;
 
-		if(curdir==NULL)  /*往根目录下写文件*/
-		{ 
+		if(lseek(fd,(clusterno[i]-2)*CLUSTER_SIZE+DATA_OFFSET,SEEK_SET)<0)
+			perror("lseek file data failed");
+		if(write(fd,data+i*CLUSTER_SIZE,size-i*CLUSTER_SIZE)<0)
+			perror("write failed");
 
-			if((ret= lseek(fd,ROOTDIR_OFFSET,SEEK_SET))<0)
+		if(curdir==NULL)		//往根目录下写文件
+		{
+			if((ret=lseek(fd,ROOTDIR_OFFSET,SEEK_SET))<0)
 				perror("lseek ROOTDIR_OFFSET failed");
-			offset = ROOTDIR_OFFSET;
-			while(offset < DATA_OFFSET)
+			offset=ROOTDIR_OFFSET;
+			while(offset<DATA_OFFSET)
 			{
-				if((ret = read(fd,buf,DIR_ENTRY_SIZE))<0)
+				if((ret=read(fd,buf,DIR_ENTRY_SIZE))<0)
 					perror("read entry failed");
 
-				offset += abs(ret);
+				offset+=abs(ret);
 
-				if(buf[0]!=0xe5&&buf[0]!=0x00)
+				if(buf[0]!=0xe5&&buf[0]!=0x00)	//Ox00表示目录项为空，0xe5表示目录项曾被使用，现已删除
 				{
-					while(buf[11] == 0x0f)
+					while(buf[11]==0x0f)
 					{
-						if((ret = read(fd,buf,DIR_ENTRY_SIZE))<0)
+						if((ret=read(fd,buf,DIR_ENTRY_SIZE))<0)
 							perror("read root dir failed");
-						offset +=abs(ret);
+						offset+=abs(ret);
 					}
 				}
-
-
-				/*找出空目录项或已删除的目录项*/ 
-				else
-				{       
-					offset = offset-abs(ret);     
+				else			//找出空目录项或已删除的目录项
+				{
+					offset=offset-abs(ret);
 					for(i=0;i<=strlen(filename);i++)
-					{
 						c[i]=toupper(filename[i]);
-					}			
 					for(;i<=10;i++)
 						c[i]=' ';
 
-					c[11] = 0x01;
+					c[0x0b]=0x01;
+
+					/*写时间和日期*/
+					c[0x16]=(cutime&0x00ff);
+					c[0x17]=((cutime&0xff00)>>8);
+					c[0x18]=(cudate&0x00ff);
+					c[0x19]=((cudate&0xff00)>>8);
 
 					/*写第一簇的值*/
-					c[26] = (clusterno[0] &  0x00ff);
-					c[27] = ((clusterno[0] & 0xff00)>>8);
+					c[0x1a]=(clusterno[0]&0x00ff);
+					c[0x1b]=((clusterno[0]&0xff00)>>8);
 
 					/*写文件的大小*/
-					c[28] = (size &  0x000000ff);
-					c[29] = ((size & 0x0000ff00)>>8);
-					c[30] = ((size& 0x00ff0000)>>16);
-					c[31] = ((size& 0xff000000)>>24);
+					c[0x1c]=(size&0x000000ff);
+					c[0x1d]=((size&0x0000ff00)>>8);
+					c[0x1e]=((size&0x00ff0000)>>16);
+					c[0x1f]=((size&0xff000000)>>24);
 
 					if(lseek(fd,offset,SEEK_SET)<0)
-						perror("lseek fd_cf failed");
+						perror("lseek ud_cf failed");
 					if(write(fd,&c,DIR_ENTRY_SIZE)<0)
 						perror("write failed");
-
-
-
 
 					free(pentry);
 					if(WriteFat()<0)
@@ -669,58 +736,60 @@ int fd_cf(char *filename,int size)
 
 					return 1;
 				}
-
 			}
 		}
-		else 
+		else
 		{
-			cluster_addr = (curdir->FirstCluster -2 )*CLUSTER_SIZE + DATA_OFFSET;
-			if((ret= lseek(fd,cluster_addr,SEEK_SET))<0)
+			cluster_addr=(curdir->FirstCluster-2)*CLUSTER_SIZE+DATA_OFFSET;
+			if((ret=lseek(fd,cluster_addr,SEEK_SET))<0)
 				perror("lseek cluster_addr failed");
-			offset = cluster_addr;
-			while(offset < cluster_addr + CLUSTER_SIZE)
+			offset=cluster_addr;
+			while(offset<cluster_addr+CLUSTER_SIZE)
 			{
-				if((ret = read(fd,buf,DIR_ENTRY_SIZE))<0)
+				if((ret=read(fd,buf,DIR_ENTRY_SIZE))<0)
 					perror("read entry failed");
 
-				offset += abs(ret);
+				offset+=abs(ret);
 
 				if(buf[0]!=0xe5&&buf[0]!=0x00)
 				{
-					while(buf[11] == 0x0f)
+					while(buf[11]==0x0f)
 					{
-						if((ret = read(fd,buf,DIR_ENTRY_SIZE))<0)
+						if((ret=read(fd,buf,DIR_ENTRY_SIZE))<0)
 							perror("read root dir failed");
-						offset +=abs(ret);
+						offset+=abs(ret);
 					}
 				}
 				else
-				{ 
-					offset = offset - abs(ret);      
+				{
+					offset=offset-abs(ret);
 					for(i=0;i<=strlen(filename);i++)
-					{
 						c[i]=toupper(filename[i]);
-					}
 					for(;i<=10;i++)
 						c[i]=' ';
 
-					c[11] = 0x01;
+					c[0x0b]=0x01;
 
-					c[26] = (clusterno[0] &  0x00ff);
-					c[27] = ((clusterno[0] & 0xff00)>>8);
+					/*写时间和日期*/
+					c[0x16]=(cutime&0x00ff);
+					c[0x17]=((cutime&0xff00)>>8);
+					c[0x18]=(cudate&0x00ff);
+					c[0x19]=((cudate&0xff00)>>8);
 
-					c[28] = (size &  0x000000ff);
-					c[29] = ((size & 0x0000ff00)>>8);
-					c[30] = ((size& 0x00ff0000)>>16);
-					c[31] = ((size& 0xff000000)>>24);
+					/*写第一簇的值*/
+					c[0x1a]=(clusterno[0]&0x00ff);
+					c[0x1b]=((clusterno[0]&0xff00)>>8);
+
+					/*写文件的大小*/
+					c[0x1c]=(size&0x000000ff);
+					c[0x1d]=((size&0x0000ff00)>>8);
+					c[0x1e]=((size&0x00ff0000)>>16);
+					c[0x1f]=((size&0xff000000)>>24);
 
 					if(lseek(fd,offset,SEEK_SET)<0)
-						perror("lseek fd_cf failed");
+						perror("lseek ud_cf failed");
 					if(write(fd,&c,DIR_ENTRY_SIZE)<0)
 						perror("write failed");
-
-
-
 
 					free(pentry);
 					if(WriteFat()<0)
@@ -728,7 +797,6 @@ int fd_cf(char *filename,int size)
 
 					return 1;
 				}
-
 			}
 		}
 	}
@@ -738,8 +806,8 @@ int fd_cf(char *filename,int size)
 		free(pentry);
 		return -1;
 	}
-	return 1;
 
+	return 1;
 }
 
 void do_usage()
@@ -785,6 +853,10 @@ int main()
 			scanf("%s", input);
 			size = atoi(input);
 			fd_cf(name,size);
+		}else if(strcmp(input,"rf")==0)
+		{
+			scanf("%s",name);
+			ud_rf(name);
 		}
 		else
 			do_usage();
