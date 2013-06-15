@@ -1,7 +1,7 @@
 #ifndef FILESYS_H
 #define FILESYS_H
 
-#define DEVNAME "/dev/sda6"                          
+#define DEVNAME "/dev/sda2"                          
 #define DIR_ENTRY_SIZE 32
 #define SECTOR_SIZE 512
 #define CLUSTER_SIZE (SECTOR_SIZE*bdptor.SectorsPerCluster)                         
@@ -9,7 +9,7 @@
 #define FAT_TWO_OFFSET (FAT_ONE_OFFSET+bdptor.SectorsPerFAT*512)                    
 #define ROOTDIR_OFFSET (FAT_TWO_OFFSET+bdptor.SectorsPerFAT*512)                
 #define DATA_OFFSET (ROOTDIR_OFFSET+32*bdptor.RootDirEntries)    
-
+#define FAT_SIZE (FAT_TWO_OFFSET-FAT_ONE_OFFSET)
            
 
 /*属性位掩码*/
@@ -19,7 +19,6 @@
 #define ATTR_VLABEL 0x08
 #define ATTR_SUBDIR 0x10
 #define ATTR_ARCHIVE 0x20
-#define FAT_SIZE 250*512
 
 /*时间掩码 5：6：5 */
 #define MASK_HOUR 0xf800 
@@ -44,7 +43,7 @@ struct BootDescriptor_t{
 	int SectorsPerTrack;       /*0x18-0x19*/
 	int Heads;                 /*0x1a-0x1b*/
 	int HiddenSectors;         /*0x1c-0x1d*/
-}BootDescriptor;
+};
 
 struct Entry{
 	unsigned char short_name[12];   /*字节0-10，11字节的短文件名*/
@@ -64,7 +63,7 @@ struct Entry{
 	unsigned char vlabel:1;
 	unsigned char subdir:1;
 	unsigned char archive:1;
-}Entry;
+};
 
 int fd_ls();
 int fd_cd(char *dir);
@@ -96,7 +95,7 @@ struct Entry *curdir = NULL;
 int dirno = 0;/*代表目录的层数*/
 struct Entry* fatherdir[10];
 
-unsigned char fatbuf[512*250];  
+unsigned char *fatbuf;
 
 #endif
 

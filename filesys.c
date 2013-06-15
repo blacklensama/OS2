@@ -14,22 +14,16 @@
 #define RevByte(low,high) ((high)<<8|(low))
 #define RevWord(lowest,lower,higher,highest) ((highest)<< 24|(higher)<<16|(lower)<<8|lowest) 
 
+int isvalidClusterNum( unsigned short clusterNum )
+{
+	if(clusterNum>=0x0003 && clusterNum<= 0xffef)
+		return 1;
+	return 0;
+}
+
 /*
 *功能：打印启动项记录
 */
-
-unsigned short getFatCluster(unsigned short prev)
-{
-	unsigned short next;
-	int index;
-
-	index=prev*2;
-	next=RevByte(fatbuf[index],fatbuf[index+1]);
-
-	return next;
-}
-
-
 void ScanBootSector()
 {
 	unsigned char buf[SECTOR_SIZE];
@@ -138,11 +132,18 @@ int GetEntry(struct Entry *pentry)
 		perror("read entry failed");
 	count += ret;
 
+
 	/* free space */
 	if(buf[0]==0xe5)
 		return -1*count;
 	if(buf[0]==0x00)
 		return 0;
+
+	/* 判断无效的记录 */
+	if(buf[0]<0x20&&buf[0]!=0x05)
+		return -1;
+	if(buf[11]>0x1f)
+		return -1;
 
 	else
 	{
@@ -153,6 +154,12 @@ int GetEntry(struct Entry *pentry)
 				perror("read root dir failed");
 			count += ret;
 		}
+
+		/* 再次检查，因为上文件名后是释放的空间 free space */
+		if(buf[0]==0xe5)
+			return -1*count;
+		if(buf[0]==0x00)
+			return 0;
 
 		/*命名格式化，主义结尾的'\0'*/
 		for (i=0 ;i<=10;i++)
@@ -254,7 +261,7 @@ int fd_ls()
 		/* added by Pengcheng YIN */
 
 		unsigned short clusterNum = curdir->FirstCluster;
-		while(clusterNum!=0xFFFF){
+		while(isvalidClusterNum(clusterNum)){
 			cluster_addr = DATA_OFFSET + (clusterNum-2) * CLUSTER_SIZE ;
 			if((ret = lseek(fd,cluster_addr,SEEK_SET))<0)
 				perror("lseek cluster_addr failed");
@@ -359,7 +366,7 @@ int ScanEntry (char *entryname,struct Entry *pentry,int mode)
 		/* added by Pengcheng YIN */
 
 		unsigned short clusterNum = curdir->FirstCluster;
-		while(clusterNum!=0xFFFF){
+		while(isvalidClusterNum(clusterNum)){
 			cluster_addr = DATA_OFFSET + (clusterNum-2) * CLUSTER_SIZE ;
 			if((ret = lseek(fd,cluster_addr,SEEK_SET))<0)
 				perror("lseek cluster_addr failed");
@@ -401,22 +408,50 @@ int fd_cd(char *dir)
 	struct Entry *pentry;
 	int ret;
 
-	if(!strcmp(dir,"."))
-	{
+	if(dir[0]==NULL){
 		return 1;
 	}
-	if(!strcmp(dir,"..") && curdir==NULL)
+
+	if(dir[0]=='/'){
+		curdir = NULL;
+		dirno = 0;
+		return fd_cd(dir+1);
+	}
+
+	if(dir[0] == '.'&&dir[1]!='.')
+	{
+		if(dir[1] == '/')
+			dir++;
+
+		return fd_cd(dir+1);
+	}
+
+	if(dir[0] == '.' && dir[1]=='.' && curdir==NULL)
 		return 1;
+
 	/*返回上一级目录*/
-	if(!strcmp(dir,"..") && curdir!=NULL)
+	if(dir[0] == '.' && dir[1]=='.' && curdir!=NULL)
 	{
+		dir+=2;
+		if(*dir == '/')
+			dir++;
+
 		curdir = fatherdir[dirno];
-		dirno--; 
-		return 1;
+		dirno--;
+
+		return fd_cd(dir);
 	}
+
 	pentry = (struct Entry*)malloc(sizeof(struct Entry));
 
-	ret = ScanEntry(dir,pentry,1);
+	char* endPtr;
+	for(endPtr = dir;*endPtr!=0&&*endPtr!='/';endPtr++)
+		;
+
+	char fileName[255] = {0};
+	strncpy(fileName,dir,endPtr-dir);
+
+	ret = ScanEntry(fileName,pentry,1);
 	if(ret < 0)
 	{
 		printf("no such dir\n");
@@ -426,7 +461,12 @@ int fd_cd(char *dir)
 	dirno ++;
 	fatherdir[dirno] = curdir;
 	curdir = pentry;
-	return 1;
+
+	dir+=endPtr-dir;
+	if(*dir == '/')
+		dir++;
+
+	return fd_cd(dir);
 }
 
 /*
@@ -436,11 +476,15 @@ int fd_cd(char *dir)
 */
 unsigned short GetFatCluster(unsigned short prev)
 {
+	ReadFat();
+
 	unsigned short next;
 	int index;
 
 	index = prev * 2;
 	next = RevByte(fatbuf[index],fatbuf[index+1]);
+
+	WriteFat();
 
 	return next;
 }
@@ -452,12 +496,15 @@ unsigned short GetFatCluster(unsigned short prev)
 */
 void ClearFatCluster(unsigned short cluster)
 {
+	ReadFat();
+
 	int index;
 	index = cluster * 2;
 
 	fatbuf[index]=0x00;
 	fatbuf[index+1]=0x00;
 
+	WriteFat();
 }
 
 
@@ -466,12 +513,13 @@ void ClearFatCluster(unsigned short cluster)
 */
 int WriteFat()
 {
+	long fd_prev = lseek(fd, 0, SEEK_CUR);
 	if(lseek(fd,FAT_ONE_OFFSET,SEEK_SET)<0)
 	{
 		perror("lseek failed");
 		return -1;
 	}
-	if(write(fd,fatbuf,512*250)<0)
+	if(write(fd,fatbuf,FAT_TWO_OFFSET-FAT_ONE_OFFSET)<0)
 	{
 		perror("read failed");
 		return -1;
@@ -481,11 +529,12 @@ int WriteFat()
 		perror("lseek failed");
 		return -1;
 	}
-	if((write(fd,fatbuf,512*250))<0)
+	if((write(fd,fatbuf,FAT_TWO_OFFSET-FAT_ONE_OFFSET))<0)
 	{
 		perror("read failed");
 		return -1;
 	}
+	lseek(fd,fd_prev,SEEK_SET);
 	return 1;
 }
 
@@ -494,16 +543,18 @@ int WriteFat()
 */
 int ReadFat()
 {
+	long fd_prev = lseek(fd, 0, SEEK_CUR);
 	if(lseek(fd,FAT_ONE_OFFSET,SEEK_SET)<0)
 	{
 		perror("lseek failed");
 		return -1;
 	}
-	if(read(fd,fatbuf,512*250)<0)
+	if(read(fd,fatbuf,FAT_TWO_OFFSET-FAT_ONE_OFFSET)<0)
 	{
 		perror("read failed");
 		return -1;
 	}
+	lseek(fd,fd_prev,SEEK_SET);
 	return 1;
 }
 
@@ -533,7 +584,7 @@ int fd_df(char *filename)
 
 	/*清除fat表项*/
 	seed = pentry->FirstCluster;
-	while((next = GetFatCluster(seed))!=0xffff)
+	while(isvalidClusterNum((next = GetFatCluster(seed))))
 	{
 		ClearFatCluster(seed);
 		seed = next;
@@ -545,19 +596,26 @@ int fd_df(char *filename)
 	/*清除目录表项*/
 	c=0xe5;
 
-
-	if(lseek(fd,ret-0x20,SEEK_SET)<0)
-		perror("lseek fd_df failed");
-	if(write(fd,&c,1)<0)
-		perror("write failed");  
-
-
-	if(lseek(fd,ret-0x40,SEEK_SET)<0)
-		perror("lseek fd_df failed");
+	ret-=32;
+	if(lseek(fd,ret,SEEK_SET)<0)
+		perror("lseek fd_dd failed");
 	if(write(fd,&c,1)<0)
 		perror("write failed");
+	/*偏移到第一个长文件名*/
+	char buf[DIR_ENTRY_SIZE];
+	while(1){
+		ret-=32;
+		if(lseek(fd,ret,SEEK_SET)<0)
+			perror("lseek fd_dd failed");
+		if( (ret = read(fd,buf,DIR_ENTRY_SIZE))<0)
+			perror("read entry failed");
+		if(buf[11]!=0x0f)
+			break;
+		if(write(fd,&c,1)<0)
+			perror("write failed");
+	}
 
-	free(pentry);
+	//free(pentry);
 	if(WriteFat()<0)
 		exit(1);
 	return 1;
@@ -572,7 +630,7 @@ int ud_rf(char *filename)
 	unsigned char *buf;
 	unsigned short seed;
 
-	pentry=(struct Entry *)malloc(sizeof(Entry));
+	pentry=(struct Entry *)malloc(sizeof(struct Entry));
 	ret=ScanEntry(filename,pentry,0);			//扫描当前目录查找文件
 
 	if(ret<0)
@@ -592,7 +650,7 @@ int ud_rf(char *filename)
 		if((ret=lseek(fd,(seed-2)*CLUSTER_SIZE+DATA_OFFSET,SEEK_SET))<0)
 			perror("lseek cluster_addr failed");
 		read(fd,buf+i*CLUSTER_SIZE,CLUSTER_SIZE);
-		seed=getFatCluster(seed);
+		seed=GetFatCluster(seed);
 	}
 	if((ret=lseek(fd,(seed-2)*CLUSTER_SIZE+DATA_OFFSET,SEEK_SET))<0)
 		perror("lseek cluster_addr failed");
@@ -604,7 +662,6 @@ int ud_rf(char *filename)
 
 	return 0;
 }
-
 
 /*
 *参数：filename，类型：char，创建文件的名称
@@ -810,11 +867,120 @@ int fd_cf(char *filename,int size)
 	return 1;
 }
 
+
+/*
+功能;删除当前目录下所有东西
+*/
+void delete_all(){
+	struct Entry pentry;
+	unsigned short clusterNum = curdir->FirstCluster;
+	int cluster_addr, ret , offset;
+	while(isvalidClusterNum(clusterNum)){
+		cluster_addr = DATA_OFFSET + (clusterNum-2) * CLUSTER_SIZE ;
+		if((ret = lseek(fd,cluster_addr,SEEK_SET))<0){
+			perror("lseek cluster_addr failed");
+			return;
+		}
+		offset = cluster_addr;
+
+		/*读一簇的内容*/
+		while(offset<cluster_addr + CLUSTER_SIZE)
+		{
+			ret = GetEntry(&pentry);
+
+			if(ret==0)
+				break;
+
+			offset += abs(ret);
+			if(ret > 0)
+			{
+				if(!strcmp((char*)pentry.short_name,".") || !strcmp((char*)pentry.short_name,".."))
+					continue;
+
+				if(pentry.subdir == 0)
+					fd_df((char*)pentry.short_name);
+				else{
+					//delete_all();
+					//fd_cd("..");
+					fd_dd((char*)pentry.short_name);
+					fd_cd("..");
+				}
+			}
+		}
+
+		clusterNum = GetFatCluster(clusterNum);
+	}
+}
+/*
+*参数：filename，类型：char
+*返回值：1，成功；-1，失败
+*功能;删除当前目录下的目录
+*/
+int fd_dd(char * dirname){
+	struct Entry pentry;
+	int ret;
+	unsigned char c;
+	unsigned short seed,next;
+
+	//pentry = (struct Entry*)malloc(sizeof(struct Entry));
+
+	/*扫描当前目录查找文件*/
+	ret = ScanEntry(dirname,&pentry,1);
+	if(ret<0)
+	{
+		printf("no such file\n");
+		return -1;
+	}
+	fd_cd(dirname);
+	delete_all();
+	fd_cd("..");
+	/*清除fat表项*/
+	seed = pentry.FirstCluster;
+	printf("my first cluster is: %d\n",seed);
+	while(isvalidClusterNum((next = GetFatCluster(seed))))
+	{
+		ClearFatCluster(seed);
+		seed = next;
+
+	}
+
+	ClearFatCluster( seed );
+
+	/*清除目录表项*/
+	c=0xe5;
+
+	ret-=32;
+	if(lseek(fd,ret,SEEK_SET)<0)
+		perror("lseek fd_dd failed");
+	if(write(fd,&c,1)<0)
+		perror("write failed");
+	/*偏移到第一个长文件名*/
+	char buf[DIR_ENTRY_SIZE];
+	while(1){
+		ret-=32;
+		if(lseek(fd,ret,SEEK_SET)<0)
+			perror("lseek fd_dd failed");
+		if( (ret = read(fd,buf,DIR_ENTRY_SIZE))<0)
+			perror("read entry failed");
+		if(buf[11]!=0x0f)
+			break;
+		if(write(fd,&c,1)<0)
+			perror("write failed");
+	}
+
+	if(WriteFat()<0)
+		exit(1);
+	return 1;
+}
+
 void do_usage()
 {
 	printf("please input a command, including followings:\n\tls\t\t\tlist all files\n\tcd <dir>\t\tchange direcotry\n\tcf <filename> <size>\tcreate a file\n\tdf <file>\t\tdelete a file\n\texit\t\t\texit this system\n");
 }
 
+char * getPath(){
+	
+}
 
 int main()
 {
@@ -824,6 +990,7 @@ int main()
 	if((fd = open(DEVNAME,O_RDWR))<0)
 		perror("open failed");
 	ScanBootSector();
+	fatbuf = (unsigned char *)malloc(sizeof(char) * (FAT_TWO_OFFSET - FAT_ONE_OFFSET));  
 	if(ReadFat()<0)
 		exit(1);
 	do_usage();
@@ -857,6 +1024,11 @@ int main()
 		{
 			scanf("%s",name);
 			ud_rf(name);
+		}
+		else if(strcmp(input, "dd") == 0)
+		{
+			scanf("%s", input);
+			fd_dd(input);
 		}
 		else
 			do_usage();
